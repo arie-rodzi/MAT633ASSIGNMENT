@@ -20,14 +20,17 @@ st.set_page_config(
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-DATA_FILE = DATA_DIR / "mat633_project_submissions.csv"
 
-ADMIN_PASSWORD = "mat633admin"  # Change this password before real deployment
+DATA_FILE = DATA_DIR / "mat633_project_submissions.csv"
+ADMIN_PASSWORD = "mat633admin"
 
 COLUMNS = [
     "timestamp",
     "group_name",
     "project_title",
+    "problem_domain",
+    "proposed_inputs",
+    "proposed_output",
     "abstract",
 
     "leader_name",
@@ -51,11 +54,232 @@ COLUMNS = [
     "declaration"
 ]
 
-if not DATA_FILE.exists():
-    pd.DataFrame(columns=COLUMNS).to_csv(DATA_FILE, index=False)
 
 # =====================================================
-# PREMIUM CSS DESIGN
+# DATA SETUP AND MIGRATION
+# =====================================================
+
+def clean_text(text) -> str:
+    if text is None:
+        return ""
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def ensure_data_file():
+    if not DATA_FILE.exists():
+        pd.DataFrame(columns=COLUMNS).to_csv(DATA_FILE, index=False)
+    else:
+        try:
+            df = pd.read_csv(DATA_FILE)
+        except Exception:
+            df = pd.DataFrame(columns=COLUMNS)
+
+        for col in COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+
+        df = df[COLUMNS]
+        df.to_csv(DATA_FILE, index=False)
+
+
+ensure_data_file()
+
+
+def load_data() -> pd.DataFrame:
+    ensure_data_file()
+    try:
+        df = pd.read_csv(DATA_FILE)
+    except Exception:
+        df = pd.DataFrame(columns=COLUMNS)
+
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[COLUMNS]
+
+
+def save_submission(row: dict):
+    df = load_data()
+    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+    df.to_csv(DATA_FILE, index=False)
+
+
+def get_all_existing_matrices(df: pd.DataFrame):
+    matrix_cols = [
+        "leader_matrix",
+        "member2_matrix",
+        "member3_matrix",
+        "member4_matrix"
+    ]
+
+    matrices = []
+
+    for col in matrix_cols:
+        if col in df.columns:
+            matrices.extend(
+                df[col]
+                .fillna("")
+                .astype(str)
+                .str.upper()
+                .str.strip()
+                .tolist()
+            )
+
+    return set([m for m in matrices if m])
+
+
+def duplicate_check(row):
+    df = load_data()
+
+    if df.empty:
+        return False, ""
+
+    project_title = clean_text(row["project_title"]).lower()
+    leader_matrix = clean_text(row["leader_matrix"]).upper()
+
+    if project_title:
+        same_title = (
+            df["project_title"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .eq(project_title)
+        )
+
+        if same_title.any():
+            return True, "This project title already exists. Please check with the lecturer if this is intentional."
+
+    existing_matrices = get_all_existing_matrices(df)
+
+    submitted_matrices = [
+        row["leader_matrix"],
+        row["member2_matrix"],
+        row["member3_matrix"],
+        row["member4_matrix"],
+    ]
+
+    submitted_matrices = [
+        clean_text(m).upper()
+        for m in submitted_matrices
+        if clean_text(m)
+    ]
+
+    for matrix in submitted_matrices:
+        if matrix in existing_matrices:
+            return True, f"Matrix number {matrix} has already been registered in another group."
+
+    if leader_matrix in existing_matrices:
+        return True, "This group leader matrix number has already submitted a registration."
+
+    return False, ""
+
+
+def validate_submission(data):
+    errors = []
+
+    required_fields = {
+        "Group Name": data["group_name"],
+        "Project Title": data["project_title"],
+        "Problem Domain": data["problem_domain"],
+        "Proposed Input Variables": data["proposed_inputs"],
+        "Proposed Output Variable": data["proposed_output"],
+        "Abstract": data["abstract"],
+
+        "Group Leader Name": data["leader_name"],
+        "Group Leader Matrix No.": data["leader_matrix"],
+        "Group Leader Class": data["leader_class"],
+
+        "Member 2 Name": data["member2_name"],
+        "Member 2 Matrix No.": data["member2_matrix"],
+        "Member 2 Class": data["member2_class"],
+
+        "Member 3 Name": data["member3_name"],
+        "Member 3 Matrix No.": data["member3_matrix"],
+        "Member 3 Class": data["member3_class"],
+    }
+
+    for label, value in required_fields.items():
+        if not clean_text(value):
+            errors.append(f"{label} is required.")
+
+    abstract_words = len(clean_text(data["abstract"]).split())
+
+    if abstract_words < 50:
+        errors.append("Abstract is too short. Please write at least 50 words.")
+
+    if abstract_words > 250:
+        errors.append("Abstract is too long. Please keep it within 250 words.")
+
+    matrix_values = [
+        data["leader_matrix"],
+        data["member2_matrix"],
+        data["member3_matrix"],
+        data["member4_matrix"]
+    ]
+
+    matrix_values = [
+        clean_text(x).upper()
+        for x in matrix_values
+        if clean_text(x)
+    ]
+
+    if len(matrix_values) != len(set(matrix_values)):
+        errors.append("Duplicate matrix numbers detected within the same group.")
+
+    member4_any = (
+        clean_text(data["member4_name"])
+        or clean_text(data["member4_matrix"])
+        or clean_text(data["member4_class"])
+    )
+
+    if member4_any:
+        if not clean_text(data["member4_name"]):
+            errors.append("Member 4 name is required if Member 4 information is provided.")
+        if not clean_text(data["member4_matrix"]):
+            errors.append("Member 4 matrix number is required if Member 4 information is provided.")
+        if not clean_text(data["member4_class"]):
+            errors.append("Member 4 class is required if Member 4 information is provided.")
+
+    if not data["declaration"]:
+        errors.append("Please tick the declaration before submitting.")
+
+    return errors
+
+
+def prepare_member_list(df):
+    member_rows = []
+
+    for _, row in df.iterrows():
+        group_name = row.get("group_name", "")
+        project_title = row.get("project_title", "")
+        problem_domain = row.get("problem_domain", "")
+
+        members = [
+            ("Leader", row.get("leader_name", ""), row.get("leader_matrix", ""), row.get("leader_class", "")),
+            ("Member 2", row.get("member2_name", ""), row.get("member2_matrix", ""), row.get("member2_class", "")),
+            ("Member 3", row.get("member3_name", ""), row.get("member3_matrix", ""), row.get("member3_class", "")),
+            ("Member 4", row.get("member4_name", ""), row.get("member4_matrix", ""), row.get("member4_class", "")),
+        ]
+
+        for role, name, matrix, student_class in members:
+            if clean_text(name):
+                member_rows.append({
+                    "group_name": group_name,
+                    "project_title": project_title,
+                    "problem_domain": problem_domain,
+                    "role": role,
+                    "student_name": name,
+                    "matrix_number": matrix,
+                    "student_class": student_class
+                })
+
+    return pd.DataFrame(member_rows)
+
+
+# =====================================================
+# PREMIUM CSS
 # =====================================================
 
 st.markdown("""
@@ -104,22 +328,8 @@ st.markdown("""
         margin-bottom: 20px;
     }
 
-    .white-card {
-        background: white;
-        padding: 20px 24px;
-        border-radius: 18px;
-        border: 1px solid #e6eaf2;
-        box-shadow: 0 8px 20px rgba(0,0,0,0.06);
-        margin-bottom: 18px;
-    }
-
-    .small-muted {
-        color: #5b6575;
-        font-size: 14px;
-    }
-
     div[data-testid="stForm"] {
-        background: rgba(255,255,255,0.90);
+        background: rgba(255,255,255,0.92);
         border: 1px solid #e6eaf2;
         border-radius: 22px;
         padding: 26px;
@@ -141,136 +351,6 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
-
-# =====================================================
-# HELPER FUNCTIONS
-# =====================================================
-
-def clean_text(text: str) -> str:
-    if text is None:
-        return ""
-    return re.sub(r"\s+", " ", str(text)).strip()
-
-
-def load_data() -> pd.DataFrame:
-    try:
-        return pd.read_csv(DATA_FILE)
-    except Exception:
-        return pd.DataFrame(columns=COLUMNS)
-
-
-def save_submission(row: dict):
-    df = load_data()
-    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
-    df.to_csv(DATA_FILE, index=False)
-
-
-def duplicate_check(project_title, leader_matrix):
-    df = load_data()
-
-    if df.empty:
-        return False, ""
-
-    title_norm = clean_text(project_title).lower()
-    leader_norm = clean_text(leader_matrix).lower()
-
-    same_title = df["project_title"].fillna("").str.strip().str.lower().eq(title_norm)
-    same_leader = df["leader_matrix"].fillna("").str.strip().str.lower().eq(leader_norm)
-
-    if same_leader.any():
-        return True, "This group leader matrix number has already submitted a registration."
-
-    if same_title.any():
-        return True, "This project title already exists. Please check with the lecturer if this is intentional."
-
-    return False, ""
-
-
-def validate_submission(data):
-    errors = []
-
-    required_fields = {
-        "Group Name": data["group_name"],
-        "Project Title": data["project_title"],
-        "Abstract": data["abstract"],
-
-        "Group Leader Name": data["leader_name"],
-        "Group Leader Matrix No.": data["leader_matrix"],
-        "Group Leader Class": data["leader_class"],
-
-        "Member 2 Name": data["member2_name"],
-        "Member 2 Matrix No.": data["member2_matrix"],
-        "Member 2 Class": data["member2_class"],
-
-        "Member 3 Name": data["member3_name"],
-        "Member 3 Matrix No.": data["member3_matrix"],
-        "Member 3 Class": data["member3_class"],
-    }
-
-    for label, value in required_fields.items():
-        if not clean_text(value):
-            errors.append(f"{label} is required.")
-
-    abstract_words = len(clean_text(data["abstract"]).split())
-
-    if abstract_words < 80:
-        errors.append("Abstract is too short. Please write at least 80 words.")
-
-    if abstract_words > 250:
-        errors.append("Abstract is too long. Please keep it within 250 words.")
-
-    matrix_values = [
-        data["leader_matrix"],
-        data["member2_matrix"],
-        data["member3_matrix"],
-        data["member4_matrix"]
-    ]
-
-    matrix_values = [clean_text(x).upper() for x in matrix_values if clean_text(x)]
-
-    if len(matrix_values) != len(set(matrix_values)):
-        errors.append("Duplicate matrix numbers detected within the same group.")
-
-    if clean_text(data["member4_name"]) or clean_text(data["member4_matrix"]) or clean_text(data["member4_class"]):
-        if not clean_text(data["member4_name"]):
-            errors.append("Member 4 name is required if Member 4 information is provided.")
-        if not clean_text(data["member4_matrix"]):
-            errors.append("Member 4 matrix number is required if Member 4 information is provided.")
-        if not clean_text(data["member4_class"]):
-            errors.append("Member 4 class is required if Member 4 information is provided.")
-
-    if not data["declaration"]:
-        errors.append("Please tick the declaration before submitting.")
-
-    return errors
-
-
-def prepare_member_list(df):
-    member_rows = []
-
-    for _, row in df.iterrows():
-        group_name = row.get("group_name", "")
-        project_title = row.get("project_title", "")
-
-        members = [
-            ("Leader", row.get("leader_name", ""), row.get("leader_matrix", ""), row.get("leader_class", "")),
-            ("Member 2", row.get("member2_name", ""), row.get("member2_matrix", ""), row.get("member2_class", "")),
-            ("Member 3", row.get("member3_name", ""), row.get("member3_matrix", ""), row.get("member3_class", "")),
-            ("Member 4", row.get("member4_name", ""), row.get("member4_matrix", ""), row.get("member4_class", "")),
-        ]
-
-        for role, name, matrix, student_class in members:
-            if clean_text(name):
-                member_rows.append({
-                    "group_name": group_name,
-                    "project_title": project_title,
-                    "role": role,
-                    "student_name": name,
-                    "matrix_number": matrix,
-                    "student_class": student_class
-                })
-
-    return pd.DataFrame(member_rows)
 
 
 # =====================================================
@@ -295,6 +375,7 @@ st.sidebar.info(
     "Semester March -- September 2026"
 )
 
+
 # =====================================================
 # HEADER
 # =====================================================
@@ -305,6 +386,7 @@ st.markdown("""
     <p>Online Group Project Registration System | Semester March -- September 2026</p>
 </div>
 """, unsafe_allow_html=True)
+
 
 # =====================================================
 # STUDENT REGISTRATION PAGE
@@ -319,7 +401,7 @@ if page == "Student Registration":
         Please complete this form once only for each group.
         Students from different classes may join the same group.
         Therefore, each member must enter their own class individually.
-        The abstract must be written in English between 80 and 250 words.
+        The abstract must be written in English between 50 and 250 words.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -338,11 +420,42 @@ if page == "Student Registration":
             placeholder="Example: Traffic Congestion Assessment using Fuzzy Inference System"
         )
 
+        problem_domain = st.selectbox(
+            "Problem Domain",
+            [
+                "",
+                "Education",
+                "Healthcare",
+                "Traffic and Transportation",
+                "Business and Finance",
+                "Environment",
+                "Agriculture",
+                "Engineering",
+                "Customer Satisfaction",
+                "Risk Assessment",
+                "Other"
+            ]
+        )
+
+        if problem_domain == "Other":
+            problem_domain = st.text_input("Please specify problem domain")
+
+        proposed_inputs = st.text_area(
+            "Proposed Input Variables",
+            height=100,
+            placeholder="Example: vehicle density, average speed, weather condition"
+        )
+
+        proposed_output = st.text_input(
+            "Proposed Output Variable",
+            placeholder="Example: traffic congestion level"
+        )
+
         abstract = st.text_area(
             "Project Abstract",
             height=190,
             placeholder=(
-                "Write 80 to 250 words about the selected problem, "
+                "Write 50 to 250 words about the selected problem, "
                 "input variables, output variable, and how FIS will be used."
             )
         )
@@ -420,6 +533,9 @@ if page == "Student Registration":
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "group_name": clean_text(group_name),
                 "project_title": clean_text(project_title),
+                "problem_domain": clean_text(problem_domain),
+                "proposed_inputs": clean_text(proposed_inputs),
+                "proposed_output": clean_text(proposed_output),
                 "abstract": clean_text(abstract),
 
                 "leader_name": clean_text(leader_name),
@@ -444,23 +560,20 @@ if page == "Student Registration":
             }
 
             errors = validate_submission(row)
-
-            is_dup, dup_msg = duplicate_check(
-                row["project_title"],
-                row["leader_matrix"]
-            )
+            is_dup, dup_msg = duplicate_check(row)
 
             if is_dup:
                 errors.append(dup_msg)
 
             if errors:
                 st.error("Please correct the following issue(s):")
-                for e in errors:
-                    st.write(f"- {e}")
+                for error in errors:
+                    st.write(f"- {error}")
             else:
                 save_submission(row)
                 st.success("Your group project registration has been submitted successfully.")
                 st.balloons()
+
 
 # =====================================================
 # ADMIN DASHBOARD
@@ -514,23 +627,26 @@ elif page == "Admin Dashboard":
 
             st.markdown("### Filter Submissions")
 
-            class_options = ["All"] + sorted(
-                member_df["student_class"]
-                .replace("", pd.NA)
-                .dropna()
-                .unique()
-                .tolist()
-            )
+            if not member_df.empty:
+                class_options = ["All"] + sorted(
+                    member_df["student_class"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .unique()
+                    .tolist()
+                )
+            else:
+                class_options = ["All"]
 
             selected_class = st.selectbox("Filter by Student Class", class_options)
 
             search = st.text_input(
-                "Search by group, title, name, matrix number, class, or abstract"
+                "Search by group, title, name, matrix number, class, domain, or abstract"
             )
 
             filtered = df.copy()
 
-            if selected_class != "All":
+            if selected_class != "All" and not member_df.empty:
                 matched_groups = member_df[
                     member_df["student_class"] == selected_class
                 ]["group_name"].unique()
@@ -552,35 +668,55 @@ elif page == "Admin Dashboard":
             st.markdown("### Student-Level List")
             filtered_member_df = prepare_member_list(filtered)
 
-            if selected_class != "All":
-                filtered_member_df = filtered_member_df[
-                    filtered_member_df["student_class"] == selected_class
-                ]
+            if not filtered_member_df.empty:
+                if selected_class != "All":
+                    filtered_member_df = filtered_member_df[
+                        filtered_member_df["student_class"] == selected_class
+                    ]
 
-            if search:
-                s = search.lower().strip()
-                filtered_member_df = filtered_member_df[
-                    filtered_member_df.apply(
-                        lambda r: s in " ".join(map(str, r.values)).lower(),
-                        axis=1
-                    )
-                ]
+                if search:
+                    s = search.lower().strip()
+                    filtered_member_df = filtered_member_df[
+                        filtered_member_df.apply(
+                            lambda r: s in " ".join(map(str, r.values)).lower(),
+                            axis=1
+                        )
+                    ]
 
             st.dataframe(filtered_member_df, use_container_width=True, hide_index=True)
 
             st.markdown("### Summary by Student Class")
 
-            class_summary = (
-                member_df
-                .replace("", pd.NA)
-                .dropna(subset=["student_class"])
-                .groupby("student_class")
-                .size()
-                .reset_index(name="number_of_students")
-                .sort_values("student_class")
-            )
+            if not member_df.empty:
+                class_summary = (
+                    member_df
+                    .replace("", pd.NA)
+                    .dropna(subset=["student_class"])
+                    .groupby("student_class")
+                    .size()
+                    .reset_index(name="number_of_students")
+                    .sort_values("student_class")
+                )
+            else:
+                class_summary = pd.DataFrame(columns=["student_class", "number_of_students"])
 
             st.dataframe(class_summary, use_container_width=True, hide_index=True)
+
+            st.markdown("### Summary by Problem Domain")
+
+            if "problem_domain" in df.columns:
+                domain_summary = (
+                    df["problem_domain"]
+                    .replace("", pd.NA)
+                    .dropna()
+                    .value_counts()
+                    .reset_index()
+                )
+                domain_summary.columns = ["problem_domain", "number_of_groups"]
+            else:
+                domain_summary = pd.DataFrame(columns=["problem_domain", "number_of_groups"])
+
+            st.dataframe(domain_summary, use_container_width=True, hide_index=True)
 
             st.divider()
 
@@ -600,6 +736,7 @@ elif page == "Admin Dashboard":
                 mime="text/csv"
             )
 
+
 # =====================================================
 # SUBMISSION GUIDE PAGE
 # =====================================================
@@ -611,7 +748,7 @@ elif page == "Submission Guide":
         <h3>📖 Guide for Students</h3>
         <p>
         Please prepare your group name, project title, member details,
-        individual class information, and abstract before filling in the form.
+        individual class information, proposed FIS variables, and abstract before filling in the form.
         </p>
     </div>
     """, unsafe_allow_html=True)
@@ -623,6 +760,9 @@ elif page == "Submission Guide":
 
     - Group name
     - Project title
+    - Problem domain
+    - Proposed input variables
+    - Proposed output variable
     - Abstract
     - Group leader name, matrix number, and class
     - Member 2 name, matrix number, and class
@@ -669,6 +809,7 @@ elif page == "Submission Guide":
     st.checkbox("My group has 3 or 4 members.")
     st.checkbox("Every member has entered their own class.")
     st.checkbox("The project title is clear and related to Fuzzy Inference System.")
-    st.checkbox("The abstract is between 80 and 250 words.")
+    st.checkbox("The abstract is between 50 and 250 words.")
     st.checkbox("All matrix numbers are correct.")
     st.checkbox("Only one submission will be made by the group leader.")
+
