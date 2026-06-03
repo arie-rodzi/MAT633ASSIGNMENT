@@ -672,4 +672,3 @@ elif page == "Submission Guide":
     st.checkbox("The abstract is between 80 and 250 words.")
     st.checkbox("All matrix numbers are correct.")
     st.checkbox("Only one submission will be made by the group leader.")
-```
